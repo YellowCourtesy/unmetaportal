@@ -152,6 +152,15 @@ RIPLEY_DISABLE_PKGS=(
   com.facebook.alohaapps.bugreporter
 )
 
+# --- Time server -----------------------------------------------------------
+# The firmware syncs the clock from time.facebook.com (backup time.android.com).
+# The clock resets to the firmware date at every boot, so a working time sync is
+# required for HTTPS. Settings.Global ntp_server replaces the primary server;
+# the firmware reads it only at boot. An IP address avoids a DNS lookup before
+# the clock is correct. 162.159.200.123 = time.cloudflare.com (resolved
+# 2026-11-01). Empty = keep the firmware's server.
+NTP_SERVER="162.159.200.123"
+
 # DO NOT DISABLE — these provide drivers / HAL / framework / input the device
 # needs to boot, take remote input, and drive the camera/mic/display. Disabling
 # them can brick the device until a factory reset. Documentation only:
@@ -417,6 +426,27 @@ disable_package_verifier() {
     || warn "could not set package_verifier_enable"
 }
 
+# Replace the firmware's time server (time.facebook.com). Takes effect at the
+# next restart.
+set_time_server() {
+  [[ -n "$NTP_SERVER" ]] || return 0
+  log "Setting the time server to $NTP_SERVER (active after restart)"
+  adbsh shell settings put global ntp_server "$NTP_SERVER" \
+    && ok "ntp_server=$NTP_SERVER" || warn "could not set ntp_server"
+}
+
+# Turn off Android's internet check (captive portal / network validation).
+# At boot the clock is wrong until the time sync runs, so HTTPS (including the
+# check itself) fails; Android then permanently disables the saved Wi-Fi network
+# (NETWORK_SELECTION_DISABLED_NO_INTERNET_PERMANENT) and the time sync never
+# gets a network. captive_portal_mode=0 ("ignore") skips the check, which also
+# stops those check requests from leaving the device.
+disable_network_check() {
+  log "Turning off Android's internet check (captive portal detection)"
+  adbsh shell settings put global captive_portal_mode 0 \
+    && ok "captive_portal_mode=0" || warn "could not set captive_portal_mode"
+}
+
 refresh_launcher() {
   # The launcher caches its app list on first scan, which happens at install
   # time — before the disable steps above run. Without this it keeps showing
@@ -488,6 +518,10 @@ revert() {
   adbq shell cmd package set-home-activity "$FB_HOME_ACTIVITY" || true
   adbq shell settings put global package_verifier_enable 1 \
     && ok "package verifier turned back on" || true
+  adbq shell settings delete global ntp_server || true
+  ok "time server reset to the firmware default"
+  adbq shell settings delete global captive_portal_mode || true
+  ok "Android internet check back to default"
   ok "FB home restored. (Data wiped by account cleanup is NOT restored.)"
   warn "You may want to: adb uninstall $LAUNCHER_PKG"
 }
@@ -519,7 +553,10 @@ This will, on the connected Portal (${PROFILE} profile):
      accounts (--with-account-cleanup). Without it, the session data stays
      on the device so ADB can be re-enabled after a restart.
   5. Turn off the Facebook package verifier so app stores can install apps
-  6. Refresh the launcher so the disabled apps disappear from its app list
+  6. Set the time server to NTP_SERVER instead of time.facebook.com
+  7. Turn off Android's internet check, so the Wi-Fi network is not disabled
+     while the clock is still wrong at boot
+  8. Refresh the launcher so the disabled apps disappear from its app list
 
 Reversible with: $0 --revert   (wiped account data is NOT restorable)
 EOF
@@ -533,6 +570,8 @@ if [[ $RUN_ACCOUNT_CLEANUP -eq 1 ]]; then
   remove_account_records
 fi
 disable_package_verifier
+set_time_server
+disable_network_check
 refresh_launcher
 verify
 
